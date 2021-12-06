@@ -1,0 +1,521 @@
+# yaml for all sql templates
+# required: Indent by 4 spaces!!!!!
+
+cohort_templates:
+    handlers_template: "
+        CREATE SCHEMA IF NOT EXISTS test;
+        CREATE TABLE IF NOT EXISTS {} as
+        (
+          select
+            ah.handler_id
+          from (
+              select distinct handler_id
+              from nysdec_reports.si1
+              where report_year = '{}'
+          ) as ah
+            left join
+            (
+              select
+                handler_id,
+                MAX(evaluation_start_date) as latest_evaluation_start_date
+              from rcra.cmecomp3 c
+              where state = 'NY' and cast(extract(year from evaluation_start_date) as varchar) = '{}'
+              group by handler_id
+            ) as c3
+            on ah.handler_id = c3.handler_id
+          where c3.latest_evaluation_start_date is not null
+        );
+        "
+
+    inspected_handler_template: "
+        CREATE TABLE IF NOT EXISTS {} as
+        (
+          select
+            ah.handler_id
+          from {} ah
+            left join
+            (
+              select
+                handler_id,
+                MAX(evaluation_start_date) as latest_evaluation_start_date
+              from rcra.cmecomp3 c
+              where state = 'NY' and cast(extract(year from evaluation_start_date) as varchar) >= '{}'
+                and cast(extract(year from evaluation_start_date) as varchar) <= '{}'
+              group by handler_id
+            ) as c3
+            on ah.handler_id = c3.handler_id
+          where c3.latest_evaluation_start_date is not null
+        );
+        "
+
+    validation_with_history_cohort_template: "
+        CREATE TABLE IF NOT EXISTS {} as
+        (
+          with active as 
+          (
+            select distinct handler_id
+            from nysdec_reports.si1
+            where report_year = '{}'
+          )
+          select
+            ah.handler_id
+          from
+            active ah inner join
+            (
+              select handler_id
+              from rcra.cmecomp3 c
+              where
+                extract(year from evaluation_start_date) >= '{}'
+                and extract(year from evaluation_start_date) <= '{}'
+              group by handler_id
+            ) as c3
+          on ah.handler_id = c3.handler_id
+        );
+        "
+    
+    validation_without_history_cohort_template: "
+    CREATE TABLE IF NOT EXISTS {} as
+        (
+            with active as
+                     (
+                         select distinct handler_id
+                         from nysdec_reports.si1
+                         where report_year = '{}'
+                     )
+            select ah.handler_id
+            from active ah
+                     left join
+                 (
+                     select handler_id,
+                            1 as dummy
+                     from rcra.cmecomp3 c
+                     where extract(year from evaluation_start_date) >= '{}'
+                       and extract(year from evaluation_start_date) <= '{}'
+                     group by handler_id
+                 ) as c3
+                 on ah.handler_id = c3.handler_id
+            where c3.dummy is null
+        )
+    "
+
+
+label_template: "
+        select si1.handler_id,
+               cast(case
+                        when c.has_formal_enforcement = 'Y' then 1
+                        when c.has_formal_enforcement = 'N' then 0
+                        else null end as bigint) as formal
+        from ({} si1
+                 left join (
+                            select
+                            handler_id,
+                            cast
+            (case
+                            when (count(enforcement_type in ('310', '210', '380', '385', '410', '420',
+                            '425', '430', '510', '520', '530', '610',
+                            '620', '630', '810', '820', '830', '840',
+                            '850', '860', '865')) = 0) then 'N'
+            else 'Y' end as varchar)
+            as has_formal_enforcement
+            from rcra.cmecomp3 c3
+            where extract (year from c3 . evaluation_start_date) = '{}'
+            group by c3.handler_id
+            ) as c
+            on si1.handler_id = c.handler_id)
+    "
+
+
+feature_templates:
+
+    # [inspection_num_total, inspection_num_three_year, inspection_num_five_year]
+    inspection_history:
+        template:
+            "
+                select
+                    ah.handler_id,
+                    c3.inspection_num_{year}
+                from
+                    {table} ah left join
+                    (
+                        select handler_id, count(*) as inspection_num_{year}
+                            from rcra.cmecomp3 c
+                            where
+                              extract(year from evaluation_start_date) >= '{start}'
+                              and extract(year from evaluation_start_date) <= '{end}'
+                        group by handler_id
+                    ) as c3
+                    on ah.handler_id = c3.handler_id
+                "
+        years:
+            [total, three_year, most_recent]
+
+    # [violation_per_inspection, complaint_per_inspection, formal_enforcement_per_inspection]_total
+    # [violation_per_inspection, complaint_per_inspection, formal_enforcement_per_inspection]_three_year
+    # [violation_per_inspection, complaint_per_inspection, formal_enforcement_per_inspection]_five_year
+    violation_history:
+        template:
+            "
+            select
+              ah.handler_id,
+              c3.violation_per_inspection_{year},
+              c3.complaint_per_inspection_{year},
+              c3.formal_enforcement_per_inspection_{year},
+              c3.disposition_AS_per_inspection_{year},
+              c3.disposition_DR_per_inspection_{year},
+              c3.disposition_DS_per_inspection_{year},
+              c3.disposition_PC_per_inspection_{year},
+              c3.disposition_PR_per_inspection_{year},
+              c3.disposition_RI_per_inspection_{year},
+              c3.disposition_RV_per_inspection_{year},
+              c3.disposition_WD_per_inspection_{year},
+              c3.sum_penalty_amount_{year},
+              c3.avg_num_violations_with_penalty_per_inspection_{year},
+              c3.avg_evaluation_type_with_follow_up_{year},
+              c3.avg_FEA_violation_per_inspection_{year}
+            from {table} ah
+            left join
+            (
+              select
+                handler_id,
+                count(case when found_violation_flag = 'Y' then 1 end)::float / count(*) as violation_per_inspection_{year},
+                count(case when citizen_complaint_flag = 'Y' then 1 end)::float / count(*) as complaint_per_inspection_{year},
+                count(case when enforcement_type in ('310', '210', '380', '385', '410', '420',
+                                            '425', '430', '510', '520', '530', '610',
+                                            '620', '630', '810', '820', '830', '840',
+                                            '850', '860', '865') then 1 end)::float / count(*) as formal_enforcement_per_inspection_{year},
+                count(case when disposition_status = 'AS' then 1 end)::float / count(*) as disposition_AS_per_inspection_{year},
+                count(case when disposition_status = 'DR' then 1 end)::float / count(*) as disposition_DR_per_inspection_{year},
+                count(case when disposition_status = 'DS' then 1 end)::float / count(*) as disposition_DS_per_inspection_{year},
+                count(case when disposition_status = 'PC' then 1 end)::float / count(*) as disposition_PC_per_inspection_{year},
+                count(case when disposition_status = 'PR' then 1 end)::float / count(*) as disposition_PR_per_inspection_{year},
+                count(case when disposition_status = 'RI' then 1 end)::float / count(*) as disposition_RI_per_inspection_{year},
+                count(case when disposition_status = 'RV' then 1 end)::float / count(*) as disposition_RV_per_inspection_{year},
+                count(case when disposition_status = 'WD' then 1 end)::float / count(*) as disposition_WD_per_inspection_{year},
+                sum(case when final_amount is not null then final_amount else 0 end) as sum_penalty_amount_{year},
+                count(case when final_amount is not null then 1 end)::float / count(*) as avg_num_violations_with_penalty_per_inspection_{year},
+                count(case when evaluation_type in ('CDI', 'CSE', 'FUI', 'NIR') then 1 end)::float / count(*) as avg_evaluation_type_with_follow_up_{year},
+                count(case when violation_type = 'FEA' then 1 end)::float / count(*) as avg_FEA_violation_per_inspection_{year}
+              from
+                  rcra.cmecomp3 c
+              where
+                  extract(year from evaluation_start_date) >= '{start}'
+                  and extract(year from evaluation_start_date) <= '{end}'
+              group by
+                  handler_id
+            ) as c3
+            on ah.handler_id = c3.handler_id
+        "
+        years:
+            [total, three_year, most_recent]
+
+    # [importer_activity, mixed_waste_generator, transporter, transfer_facility, tsd_activity, recycler_activity]_most_recent
+    facility_info:
+        template:
+            "
+                select
+                  ah.handler_id,
+                  si.importer_activity_{year},
+                  si.mixed_waste_generator_{year},
+                  si.transporter_{year},
+                  si.transfer_facility_{year},
+                  si.tsd_activity_{year},
+                  si.recycler_activity_{year}
+                from {table} ah
+                left join
+                (
+                  select handler_id
+                   ,(case
+                        when importer_activity = 'N' then 0
+                        when importer_activity = 'Y' then 1
+                    end) importer_activity_{year}
+                   , (case
+                        when mixed_waste_generator = 'N' then 0
+                        when mixed_waste_generator = 'Y' then 1
+                    end) mixed_waste_generator_{year}
+                   ,(case
+                        when transporter = 'N' then 0
+                        when transporter = 'Y' then 1
+                    end) transporter_{year}
+                   ,(case
+                        when transfer_facility = 'N' then 0
+                        when transfer_facility = 'Y' then 1
+                    end) transfer_facility_{year}
+                   ,(case
+                        when tsd_activity = 'N' then 0
+                        when tsd_activity = 'Y' then 1
+                    end) tsd_activity_{year}
+                   ,(case
+                        when recycler_activity = 'N' then 0
+                        when recycler_activity = 'Y' then 1
+                   end) recycler_activity_{year}
+                  from nysdec_reports.si1
+                  where
+                    report_year >= '{start}' and report_year <= '{end}'
+                ) as si
+                on ah.handler_id = si.handler_id
+              "
+        years:
+            [most_recent]
+
+    # [percent_no_waste_min, percent_initiated_waste_min, percent_continue_waste_min, total_num_waste]_most_recent
+    waste_info:
+        template:
+            "
+            select ah.handler_id
+                 , waste_info.percent_no_waste_min_{year}
+                 , waste_info.percent_initiated_waste_min_{year}
+                 , waste_info.percent_continue_waste_min_{year}
+                 , waste_info.percent_rest_waste_min_{year}
+                 , waste_info.total_num_waste_{year}
+                 , waste_info.percent_on_site_management_{year}
+                 , waste_info.percent_off_site_management_{year}
+                 , waste_info.total_gen_qty_pound_{year}
+            from {table} ah
+                     left join
+                 (
+                     select gm1.handler_id
+                          , (count(case when gm1.waste_min_code in ('N', 'X') then 1 end))::float / count(*) as percent_no_waste_min_{year}
+                          , (count(case when gm1.waste_min_code in ('A', 'B') then 1 end))::float / count(*) as percent_initiated_waste_min_{year}
+                          , (count(case when gm1.waste_min_code in ('C', 'D') then 1 end))::float / count(*) as percent_continue_waste_min_{year}
+                          , (count(case when gm1.waste_min_code not in ('N', 'X', 'A', 'B', 'C', 'D') then 1 end))::float / count(*)  as percent_rest_waste_min_{year}
+                          , count(*)  as total_num_waste_{year}
+                          , (count(case when gm1.on_site_management = 'Y' then 1 end))::float / count(*) as percent_on_site_management_{year}
+                          , (count(case when gm1.on_site_management = 'N' then 1 end))::float / count(*) as percent_off_site_management_{year}
+                          , sum((
+                         case
+                             when unit_of_measure = '1' then gen_qty /* pounds */
+                             when unit_of_measure = '2' then gen_qty * 2000 /* short tons */
+                             when unit_of_measure = '3' then gen_qty * 2.205 /* kilogram */
+                             when unit_of_measure = '4' then gen_qty * 2.205 * 1000 /* 1000 kilogram */
+                             when unit_of_measure in ('5', '6', '7') then
+                                 case
+                                     when wst_density = 1 and density_unit_of_measure = '2' then NULL /* can't do unknown density */
+                                     when density_unit_of_measure = '2' then
+                                         case
+                                             when unit_of_measure = '5' then gen_qty * wst_density * 8.345 /* gallon */
+                                             when unit_of_measure = '6' then gen_qty * 0.264172 * wst_density * 8.345 /* liters */
+                                             when unit_of_measure = '7'
+                                                 then gen_qty * 201.974 * wst_density * 8.345 /* cubic yards */
+                                             end
+                                     when density_unit_of_measure = '1' then
+                                         case
+                                             when unit_of_measure = '5' then gen_qty * wst_density /* gallon */
+                                             when unit_of_measure = '6' then gen_qty * 0.264172 * wst_density /* liters */
+                                             when unit_of_measure = '7' then gen_qty * 201.974 * wst_density /* cubic yards */
+                                             end
+                                     end
+                             end
+                         ))                                                                                  as total_gen_qty_pound_{year}
+                     from nysdec_reports.gm1 gm1
+                     where gm1.report_year >= '{start}'
+                       and gm1.report_year <= '{end}'
+                     group by gm1.handler_id
+                 ) as waste_info
+                 on ah.handler_id = waste_info.handler_id;
+                "
+        years:
+            [most_recent, three_year]
+
+    # [num_active_facilities_parent_company]_most_recent
+    num_active_facilities_parent_company:
+        template:
+            "
+                select ah.handler_id
+                     , si2.num_handlers as num_active_facilities_parent_company_{year}
+                from {table} ah
+                    left join
+                    (
+                    select a.handler_id, max(b.num_handlers) as num_handlers
+                    from nysdec_reports.si2 as a
+                    join
+                    (
+                    select owner_operator_name, count(distinct handler_id) as num_handlers
+                    from nysdec_reports.si2
+                    where report_year >= '{start}' and report_year <= '{end}'
+                    and owner_operator_indicator = 'CO'
+                    group by owner_operator_name
+                    ) as b
+                    on a.owner_operator_name = b.owner_operator_name
+                    where owner_operator_indicator = 'CO'
+                    group by handler_id
+                    ) as si2
+                on ah.handler_id = si2.handler_id
+             "
+        years:
+            [most_recent, three_year]
+
+    primary_naics:
+        template:
+            "
+            select ah.handler_id,
+                   si3.naics_code_two_digit as primary_naics_code_two_digit_{year}
+            from {table} ah
+                     left join
+                 (
+                     select handler_id,
+                            substr(naics_code, 1, 2) as naics_code_two_digit
+                     from nysdec_reports.si3
+                     where naics_seq = '1'
+                       and report_year >= '{start}'
+                       and report_year <= '{end}'
+                 ) as si3
+                 on ah.handler_id = si3.handler_id
+            "
+        years:
+            [most_recent]
+
+    waste_code:
+        template:
+            "
+            select ah.handler_id
+                 , waste_codes.percent_ignitable_{year}
+                 , waste_codes.percent_corrosive_{year}
+                 , waste_codes.percent_reactive_{year}
+                 , waste_codes.percent_toxic_{year}
+            from {table} ah
+                     left join
+                 (
+                     select gm1.handler_id
+                          , (count(case when gm2.epa_waste_code = 'D001' then 1 end))::float / count(*) as percent_ignitable_{year}
+                          , (count(case when gm2.epa_waste_code = 'D002' then 1 end))::float / count(*) as percent_corrosive_{year}
+                          , (count(case when gm2.epa_waste_code = 'D003' then 1 end))::float / count(*) as percent_reactive_{year}
+                          , (count(case when gm2.epa_waste_code > 'D004' and gm2.epa_waste_code < 'D043' then 1 end))::float / count(*) as percent_toxic_{year}
+                     from nysdec_reports.gm1 gm1
+                        left join nysdec_reports.gm2 on gm1.hz_pg = gm2.hz_pg
+                            and gm1.handler_id = gm2.handler_id
+                            and gm1.report_year = gm2.report_year
+                     where gm1.report_year >= '{start}'
+                       and gm1.report_year <= '{end}'
+                     group by gm1.handler_id
+                 ) as waste_codes
+                 on ah.handler_id = waste_codes.handler_id;
+            "
+        years:
+            [most_recent, three_year, total]
+
+    parent_company_info:
+        template:
+            "
+            with ho as (
+              select handler_id, owner_operator_name
+              from (
+                select handler_id , owner_operator_name, row_number() over (partition by handler_id order by report_year) rn 
+                from nysdec_reports.si2
+                where report_year <= '{end}' and owner_operator_indicator = 'CO'
+              ) as s
+              where rn = 1
+            ),
+            parent_avg as (
+              select owner_operator_name,
+              avg(violation_per_inspection) as avg_violation_owner,
+              avg(complaint_per_inspection) as avg_complaint_owner,
+              avg(formal_enforcement_per_inspection) as avg_fe_owner
+              from ho left join (
+                select handler_id, 
+                count(case when found_violation_flag = 'Y' then 1 end)::float / count(*) as violation_per_inspection,
+                count(case when citizen_complaint_flag = 'Y' then 1 end)::float / count(*) as complaint_per_inspection,
+                count(case when enforcement_type in ('310', '210', '380', '385', '410', '420',
+                                                            '425', '430', '510', '520', '530', '610',
+                                                            '620', '630', '810', '820', '830', '840',
+                                                            '850', '860', '865') then 1 end)::float / count(*) as formal_enforcement_per_inspection
+                from rcra.cmecomp3 
+                where 
+                  extract(year from evaluation_start_date) >= '{start}'
+                  and extract(year from evaluation_start_date) <= '{end}'
+                group by handler_id
+              ) c
+              on ho.handler_id = c.handler_id
+              group by owner_operator_name
+            ),
+            res as (
+              select ho.handler_id, pa.avg_violation_owner, pa.avg_complaint_owner, pa.avg_fe_owner
+              from ho inner join parent_avg pa
+              on ho.owner_operator_name = pa.owner_operator_name
+            )
+            select 
+              th.handler_id, 
+              res.avg_violation_owner as avg_violation_owner_{year}, 
+              res.avg_complaint_owner as avg_complaint_owner_{year}, 
+              res.avg_fe_owner as avg_formal_enforcement_owner_{year}
+            from {table} th left join res 
+            on th.handler_id = res.handler_id
+            "
+        years:
+            [most_recent, three_year, total]
+
+    geographic_info:
+        template:
+            "
+            with lt as 
+            (select ah.handler_id, (case when c.land_type is null then 'O' else c.land_type end) as land_type
+            from {table} ah left join 
+            (select handler_id, max(land_type) as land_type 
+            from rcra.cmecomp3
+            group by handler_id 
+            ) as c
+            on ah.handler_id = c.handler_id),
+            st as
+            (select ah.handler_id, s.state_district
+            from {table} ah left join 
+            (select handler_id, max(state_district) as state_district
+            from nysdec_reports.si1
+            group by handler_id 
+            ) as s 
+            on ah.handler_id = s.handler_id)
+            select st.handler_id, lt.land_type as land_type_{year}, st.state_district as state_district_{year}
+            from st inner join lt
+            on st.handler_id = lt.handler_id
+            "
+        years:
+            [most_recent]
+
+    geographic_info_zip:
+        template:
+            "
+            with hz as (
+              select handler_id, location_zip 
+              from (
+                select handler_id , location_zip , row_number() over (partition by handler_id order by report_year) rn 
+                from nysdec_reports.si1
+                where report_year <= '{end}') as s
+              where rn = 1
+            ),
+            zip_avg as (
+              select 
+                location_zip, 
+                avg(violation_per_inspection) as avg_violation_zip, 
+                avg(complaint_per_inspection) as avg_complaint_zip, 
+                avg(formal_enforcement_per_inspection) as avg_fe_zip
+              from hz left join (
+              select 
+                handler_id, count(case when found_violation_flag = 'Y' then 1 end)::float / count(*) as violation_per_inspection,
+                count(case when citizen_complaint_flag = 'Y' then 1 end)::float / count(*) as complaint_per_inspection,
+                count(case when enforcement_type in ('310', '210', '380', '385', '410', '420',
+                                              '425', '430', '510', '520', '530', '610',
+                                              '620', '630', '810', '820', '830', '840',
+                                              '850', '860', '865') then 1 end)::float / count(*) as formal_enforcement_per_inspection
+                from rcra.cmecomp3 
+              where 
+                extract(year from evaluation_start_date) >= '{start}'
+                and extract(year from evaluation_start_date) <= '{end}'
+              group by handler_id
+              ) c
+              on hz.handler_id = c.handler_id
+              group by location_zip
+            ),
+            res as (
+              select hz.handler_id, za.avg_violation_zip, za.avg_complaint_zip, za.avg_fe_zip
+              from hz inner join zip_avg za
+              on hz.location_zip = za.location_zip
+            )
+            select 
+              th.handler_id, 
+              res.avg_violation_zip as avg_violation_zip_{year}, 
+              res.avg_complaint_zip as avg_complaint_zip_{year}, 
+              res.avg_fe_zip as avg_formal_enforcement_zip_{year}
+            from {table} th left join res 
+            on th.handler_id = res.handler_id
+            "
+        years:
+            [most_recent, three_year, total]
+
